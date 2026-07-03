@@ -1,1 +1,301 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Internet TV - Worldwide Channels</title>
+    <style>
+        *{margin:0;padding:0;box-sizing:border-box;font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,Arial,sans-serif;}
+        body{background:#1a1a2e;color:#eee;height:100vh;overflow:hidden;display:flex;flex-direction:column;}
+        header{padding:.75rem 1.5rem;background:#16213e;display:flex;align-items:center;gap:1rem;flex-shrink:0;flex-wrap:wrap;}
+        header h1{font-size:1.4rem;white-space:nowrap;}
+        #search{padding:.45rem 1rem;border:1px solid #333;border-radius:4px;background:#1a1a2e;color:#fff;flex:1;min-width:150px;max-width:340px;}
+        .header-btn{color:#aaa;font-size:0.85rem;background:#1e2a45;border:1px solid #334;border-radius:4px;cursor:pointer;padding:.4rem .85rem;white-space:nowrap;transition:background .2s;}
+        .header-btn:hover{background:#2a3a5e;}
+        .header-btn.active{color:#f0a500;border-color:#f0a500;}
+        #favorites-badge{font-size:.8rem;color:#888;white-space:nowrap;}
+
+        /* ── MAIN LAYOUT ── */
+        .main-content{flex:1;display:flex;min-height:0;overflow:hidden;}
+
+        /* ── SIDEBAR ── */
+        .sidebar{width:300px;min-width:200px;background:#0f0f1a;display:flex;flex-direction:column;border-right:1px solid #2a2a4a;flex-shrink:0;}
+        .sidebar h2{padding:.75rem 1rem;font-size:1rem;color:#aaa;border-bottom:1px solid #222;flex-shrink:0;}
+        #channel-list-wrap{flex:1;overflow-y:auto;overflow-x:hidden;}
+        #channel-list-wrap::-webkit-scrollbar{width:5px;}
+        #channel-list-wrap::-webkit-scrollbar-track{background:#0a0a14;}
+        #channel-list-wrap::-webkit-scrollbar-thumb{background:#2a2a5a;border-radius:3px;}
+        #channel-list{list-style:none;}
+
+        /* group headers inside the list */
+        .group-header{padding:.4rem 1rem;font-size:.7rem;font-weight:600;text-transform:uppercase;letter-spacing:.08em;color:#556;background:#0a0a14;position:sticky;top:0;z-index:1;}
+
+        .channel-item{padding:.6rem 1rem;border-bottom:1px solid #181828;cursor:pointer;transition:background .15s;}
+        .channel-item:hover{background:#1a1a3e;}
+        .channel-item.active{background:#1e2a5e;border-left:3px solid #4a9eff;}
+        .channel-info{display:flex;justify-content:space-between;align-items:center;gap:.5rem;}
+        .channel-info strong{font-size:.88rem;line-height:1.3;}
+        .channel-info .grp{font-size:.7rem;color:#556;white-space:nowrap;}
+        .fav-star{margin-left:.4rem;cursor:pointer;font-size:.85rem;opacity:.5;transition:opacity .2s;}
+        .fav-star.on{opacity:1;color:#f0a500;}
+
+        /* ── PLAYER ── */
+        .player-container{flex:1;display:flex;flex-direction:column;align-items:center;justify-content:center;padding:1.5rem;overflow:hidden;background:#111122;}
+        #video-player{width:100%;max-width:1100px;max-height:calc(100% - 60px);aspect-ratio:16/9;background:#000;border-radius:6px;display:block;}
+        #now-playing{margin-top:.75rem;font-size:.85rem;color:#778;text-align:center;}
+        .error-msg{color:#ff6b6b;}
+
+        /* ── LOAD CHANNELS BUTTON AREA ── */
+        #load-status{font-size:.75rem;color:#556;margin-top:.3rem;text-align:center;}
+    </style>
+</head>
+<body>
+<header>
+    <h1>🌐 Internet TV</h1>
+    <input type="text" id="search" placeholder="Search channels..." oninput="searchChannels()">
+    <button class="header-btn" id="favorites-btn" onclick="toggleFavoritesView()">Favorites ♥</button>
+    <button class="header-btn" id="load-btn" onclick="loadChannelFile()" title="Load channels.m3u from server">📂 Load Channels</button>
+    <span id="favorites-badge">0 favorites</span>
+</header>
+
+<div class="main-content">
+    <aside class="sidebar">
+        <h2>Channels</h2>
+        <div id="channel-list-wrap">
+            <ul id="channel-list"><li style="padding:1rem;color:#556;">Loading…</li></ul>
+        </div>
+    </aside>
+    <main class="player-container">
+        <video id="video-player" controls autoplay playsinline></video>
+        <div id="now-playing">Select a channel to start watching</div>
+        <div id="load-status"></div>
+    </main>
+</div>
+
+<script src="https://cdn.jsdelivr.net/npm/hls.js@latest"></script>
+<script src="https://cdn.jsdelivr.net/npm/axios@1.6.2/dist/axios.min.js"></script>
+<script>
+// ── State ────────────────────────────────────────────────────────────────────
+const video      = document.getElementById('video-player');
+const channelList= document.getElementById('channel-list');
+const nowPlaying = document.getElementById('now-playing');
+const favBadge   = document.getElementById('favorites-badge');
+const loadStatus = document.getElementById('load-status');
+
+let allChannels    = [];
+let favorites      = [];          // array of channel objects
+let showFavOnly    = false;
+let activeItem     = null;
+let hlsInstance    = null;
+let selectedChannel= null;
+
+// ── Helpers ──────────────────────────────────────────────────────────────────
+function escapeHTML(str) {
+    const d = document.createElement('div');
+    d.textContent = str || '';
+    return d.innerHTML;
+}
+
+function isFav(ch) {
+    return favorites.some(f => f.url === ch.url);
+}
+
+// ── Render ───────────────────────────────────────────────────────────────────
+function groupChannels(channels) {
+    const groups = {};
+    channels.forEach(ch => {
+        const g = ch['group-title'] || 'Other';
+        (groups[g] = groups[g] || []).push(ch);
+    });
+    return groups;
+}
+
+function renderChannels(channels) {
+    const groups = groupChannels(channels);
+    channelList.innerHTML = '';
+
+    if (channels.length === 0) {
+        channelList.innerHTML = '<li style="padding:1rem;color:#556;">No channels found.</li>';
+        return;
+    }
+
+    Object.keys(groups).sort().forEach(group => {
+        // group header
+        const hdr = document.createElement('li');
+        hdr.className = 'group-header';
+        hdr.textContent = group;
+        channelList.appendChild(hdr);
+
+        groups[group].forEach(ch => {
+            const li = document.createElement('li');
+            li.className = 'channel-item' + (selectedChannel && selectedChannel.url === ch.url ? ' active' : '');
+            li.dataset.url = ch.url;
+
+            const starOn = isFav(ch) ? 'on' : '';
+            li.innerHTML = `
+                <div class="channel-info">
+                    <strong>${escapeHTML(ch.name)}</strong>
+                    <span style="display:flex;align-items:center;gap:.3rem;">
+                        <span class="grp">${escapeHTML(ch['group-title'] || '')}</span>
+                        <span class="fav-star ${starOn}" title="Toggle favorite">★</span>
+                    </span>
+                </div>`;
+
+            // Click on item → play
+            li.addEventListener('click', (e) => {
+                if (e.target.classList.contains('fav-star')) return; // handled below
+                selectChannel(ch, li);
+            });
+
+            // Click on star → toggle favorite
+            li.querySelector('.fav-star').addEventListener('click', (e) => {
+                e.stopPropagation();
+                toggleFavorite(ch, e.target);
+            });
+
+            channelList.appendChild(li);
+        });
+    });
+}
+
+// ── Channel selection & playback ─────────────────────────────────────────────
+function selectChannel(ch, li) {
+    // Deactivate previous
+    if (activeItem) activeItem.classList.remove('active');
+    li.classList.add('active');
+    activeItem = li;
+    selectedChannel = ch;
+    playChannel(ch);
+}
+
+function playChannel(ch) {
+    const proxiedUrl = '/api/stream?url=' + encodeURIComponent(ch.url);
+    nowPlaying.textContent = `⏳ Loading: ${ch.name}`;
+
+    // Destroy previous HLS instance cleanly
+    if (hlsInstance) {
+        hlsInstance.destroy();
+        hlsInstance = null;
+    }
+    video.removeAttribute('src');
+    video.load();
+
+    if (Hls.isSupported()) {
+        hlsInstance = new Hls({
+            enableWorker: true,
+            lowLatencyMode: false,
+            xhrSetup: (xhr) => { xhr.withCredentials = false; }
+        });
+        hlsInstance.loadSource(proxiedUrl);
+        hlsInstance.attachMedia(video);
+        hlsInstance.on(Hls.Events.MANIFEST_PARSED, () => {
+            video.play().catch(() => {});
+            nowPlaying.textContent = `▶ Now playing: ${ch.name}`;
+        });
+        hlsInstance.on(Hls.Events.ERROR, (event, data) => {
+            if (data.fatal) {
+                nowPlaying.innerHTML = `<span class="error-msg">⚠ Stream error: ${escapeHTML(data.type)}</span>`;
+            }
+        });
+    } else if (video.canPlayType('application/vnd.apple.mpegurl')) {
+        video.src = proxiedUrl;
+        video.play().catch(() => {});
+        nowPlaying.textContent = `▶ Now playing: ${ch.name}`;
+    } else {
+        nowPlaying.innerHTML = '<span class="error-msg">Your browser does not support HLS.</span>';
+    }
+}
+
+// ── Favorites ────────────────────────────────────────────────────────────────
+async function loadFavorites() {
+    try {
+        const r = await axios.get('/api/favorites');
+        favorites = r.data || [];
+    } catch(e) { favorites = []; }
+    updateFavBadge();
+}
+
+function updateFavBadge() {
+    favBadge.textContent = `${favorites.length} favorite${favorites.length !== 1 ? 's' : ''}`;
+}
+
+async function toggleFavorite(ch, starEl) {
+    if (isFav(ch)) {
+        // Remove
+        await axios.delete('/api/favorites', { data: { url: ch.url } });
+        favorites = favorites.filter(f => f.url !== ch.url);
+        starEl.classList.remove('on');
+    } else {
+        // Add
+        const payload = { name: ch.name, url: ch.url, 'group-title': ch['group-title'] || '' };
+        await axios.post('/api/favorites', payload);
+        favorites.push(payload);
+        starEl.classList.add('on');
+    }
+    updateFavBadge();
+    if (showFavOnly) renderChannels(favorites);
+}
+
+function toggleFavoritesView() {
+    showFavOnly = !showFavOnly;
+    document.getElementById('favorites-btn').classList.toggle('active', showFavOnly);
+    renderChannels(showFavOnly ? favorites : filterChannels());
+}
+
+// ── Search ───────────────────────────────────────────────────────────────────
+function filterChannels() {
+    const q = document.getElementById('search').value.toLowerCase().trim();
+    if (!q) return allChannels;
+    return allChannels.filter(c =>
+        (c.name && c.name.toLowerCase().includes(q)) ||
+        (c['group-title'] && c['group-title'].toLowerCase().includes(q))
+    );
+}
+
+function searchChannels() {
+    showFavOnly = false;
+    document.getElementById('favorites-btn').classList.remove('active');
+    renderChannels(filterChannels());
+}
+
+// ── Load channel file from server ────────────────────────────────────────────
+async function loadChannelFile() {
+    loadStatus.textContent = '⏳ Loading channels.m3u …';
+    try {
+        // POST to /api/import_url pointing to local static file served by Flask
+        // OR use the file-upload endpoint with a fetch of /static/channels.m3u
+        const r = await axios.get('/api/channels?size=10000');
+        allChannels = r.data.channels || [];
+        renderChannels(allChannels);
+        loadStatus.textContent = `✅ ${allChannels.length} channels loaded`;
+        setTimeout(() => loadStatus.textContent = '', 3000);
+    } catch(err) {
+        loadStatus.textContent = '❌ Failed to load channels';
+    }
+}
+
+// ── Video error ───────────────────────────────────────────────────────────────
+video.addEventListener('error', () => {
+    if (video.error) {
+        nowPlaying.innerHTML = `<span class="error-msg">⚠ Video error: ${escapeHTML(video.error.message)}</span>`;
+    }
+});
+
+// ── Init ──────────────────────────────────────────────────────────────────────
+(async () => {
+    await loadFavorites();
+    try {
+        const r = await axios.get('/api/channels?size=10000');
+        allChannels = r.data.channels || [];
+        renderChannels(allChannels);
+        if (allChannels.length === 0) {
+            channelList.innerHTML = '<li style="padding:1rem;color:#556;">No channels found.<br>Use "📂 Load Channels" or add a channels.m3u file.</li>';
+        }
+    } catch(e) {
+        channelList.innerHTML = '<li style="padding:1rem;color:#ff6b6b;">Failed to load channels.</li>';
+    }
+})();
+</script>
+</body>
+</html>
 
