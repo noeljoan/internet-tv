@@ -1,0 +1,17 @@
+version: '3.8'
+
+services:
+  internet-tv:
+    build: .
+    ports:
+      - "8000:8000"
+    volumes:
+      # Mount for application code
+      - ./src:/app/src
+      # Mount for network data (M3U8 and favorites)
+      - ./network:/app/network
+      - ./favorites.json:/app/favorites.json
+    # Optional: Use environment variables for configuration
+    environment:
+      - FLASK_ENV=production
+    restart: unless-stopped
