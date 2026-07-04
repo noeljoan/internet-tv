@@ -84,6 +84,10 @@ Open **http://localhost:5000** in your browser.
 
 ---
 
+## Screenshot
+
+![Dashboard](screenshot.png)
+
 ## 📁 Project Structure
 
 ```
