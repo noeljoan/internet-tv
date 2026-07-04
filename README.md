@@ -84,7 +84,7 @@ Open **http://localhost:5000** in your browser.
 
 ---
 
-## Screenshot
+## 🖼️ Screenshot
 
 ![Dashboard](screenshot.png)
 
