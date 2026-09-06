@@ -8,10 +8,10 @@ import logging
 import signal
 import sys
 import math
-import socket
-import ipaddress
 import requests
 from urllib.parse import urljoin, urlparse, quote, unquote
+
+from safe_fetch import safe_fetch, SSRFValidationError
 
 # Configure logging based on environment variable
 LOG_LEVEL = os.getenv('LOG_LEVEL', 'INFO').upper()
@@ -260,12 +260,18 @@ def import_channels_from_url():
     url = data.get('url')
     if not url:
         return jsonify({'error': 'No URL provided'}), 400
-    if not _is_safe_upstream_url(url):
-        return jsonify({'error': 'URL not allowed'}), 400
     try:
-        resp = requests.get(url, timeout=15, headers={'User-Agent': PROXY_USER_AGENT})
+        # safe_fetch validates the initial URL AND every redirect hop, and
+        # pins each connection to its pre-validated IP(s) to close the
+        # DNS-rebinding gap. This replaces the old one-shot
+        # _is_safe_upstream_url() + requests.get() combination, which only
+        # checked the first hop and let requests follow redirects blindly.
+        resp = safe_fetch(url, timeout=15, headers={'User-Agent': PROXY_USER_AGENT})
         resp.raise_for_status()
         content = resp.text
+    except SSRFValidationError as exc:
+        logger.warning(f'Blocked unsafe import URL {url}: {exc}')
+        return jsonify({'error': 'URL not allowed'}), 400
     except requests.RequestException as exc:
         logger.warning(f'Import-from-URL failed for {url}: {exc}')
         return jsonify({'error': 'Failed to fetch playlist'}), 502
@@ -295,24 +301,19 @@ def play_channel():
 # This proxy fetches streams server-side (not subject to CORS) and re-serves
 # them from our own origin, rewriting playlist URIs to route back through
 # the proxy so nested playlists/segments/keys are proxied too.
+#
+# SSRF NOTE: both this endpoint and /api/import_url fetch a caller-supplied
+# URL server-side. Validating only the initial hostname and then handing the
+# original URL to requests.get() (which follows redirects by default) left a
+# validation-to-use gap: a public URL could redirect to a loopback/private/
+# metadata address that was never checked, and a second gap existed because
+# the safety check and the actual connection each ran their own independent
+# DNS resolution (DNS rebinding). safe_fetch() (see safe_fetch.py) closes
+# both gaps: it validates every redirect hop and pins each connection to its
+# pre-validated IP(s).
 
 PROXY_USER_AGENT = 'Mozilla/5.0 (compatible; InternetTVProxy/1.0)'
 _URI_ATTR_RE = re.compile(r'URI="([^"]+)"')
-
-def _is_safe_upstream_url(url):
-    """Basic SSRF guard: only allow http(s) URLs that don't resolve to
-    private/loopback/link-local/reserved addresses."""
-    try:
-        parsed = urlparse(url)
-        if parsed.scheme not in ('http', 'https') or not parsed.hostname:
-            return False
-        for info in socket.getaddrinfo(parsed.hostname, None):
-            ip = ipaddress.ip_address(info[4][0])
-            if ip.is_private or ip.is_loopback or ip.is_link_local or ip.is_reserved or ip.is_multicast:
-                return False
-        return True
-    except (ValueError, OSError):
-        return False
 
 def _proxied(url):
     return '/api/stream?url=' + quote(url, safe='')
@@ -339,14 +340,19 @@ def stream_proxy():
     if not target:
         return jsonify({'error': 'No URL provided'}), 400
     target = unquote(target)
-    if not _is_safe_upstream_url(target):
-        return jsonify({'error': 'URL not allowed'}), 400
 
     try:
-        upstream = requests.get(
+        # See SSRF NOTE above: safe_fetch replaces the old
+        # _is_safe_upstream_url() + requests.get(..., stream=True) pair,
+        # validating every redirect hop and pinning connections to
+        # pre-checked IPs instead of trusting a single upfront check.
+        upstream = safe_fetch(
             target, stream=True, timeout=10,
             headers={'User-Agent': PROXY_USER_AGENT}
         )
+    except SSRFValidationError as exc:
+        logger.warning(f'Blocked unsafe stream URL {target}: {exc}')
+        return jsonify({'error': 'URL not allowed'}), 400
     except requests.RequestException as exc:
         logger.warning(f'Proxy fetch failed for {target}: {exc}')
         return jsonify({'error': 'Failed to fetch stream'}), 502
